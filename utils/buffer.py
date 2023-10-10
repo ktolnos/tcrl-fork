@@ -7,7 +7,6 @@ from collections import defaultdict
 
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.utils.data import IterableDataset
 
 
@@ -155,7 +154,9 @@ class ReplayBuffer(IterableDataset):
             acts.append(episode['action'][_idx])
             rews.append(episode['reward'][_idx])
             discounts.append(episode['discount'][_idx])
-        next_obses, acts, rews, discounts = np.stack(next_obses, axis=0), np.stack(acts, axis=0), np.stack(rews, axis=0), np.stack(discounts, axis=0)
+        next_obses, acts, rews, discounts = np.stack(next_obses, axis=0), np.stack(acts, axis=0), np.stack(rews,
+                                                                                                           axis=0), np.stack(
+            discounts, axis=0)
 
         return (obs, acts, rews, discounts, next_obses)
 

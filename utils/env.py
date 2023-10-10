@@ -1,13 +1,13 @@
-from collections import deque, defaultdict, OrderedDict
+import warnings
+from collections import deque
 from typing import Any, NamedTuple
+
 import dm_env
 import numpy as np
 from dm_control import suite
-from dm_control.suite.wrappers import action_scale
 from dm_env import StepType, specs
 
-import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning) 
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
 class ExtendedTimeStep(NamedTuple):
@@ -31,7 +31,8 @@ class ExtendedTimeStep(NamedTuple):
             return getattr(self, attr)
         else:
             return tuple.__getitem__(self, attr)
-            
+
+
 class ActionRepeatWrapper(dm_env.Environment):
     def __init__(self, env, num_repeats):
         self._env = env
@@ -73,7 +74,7 @@ class FrameStackWrapper(dm_env.Environment):
         self._env = env
         self._num_frames = num_frames
         self._frames = deque([], maxlen=num_frames)
-        
+
         self._pixels_key = pixels_key
 
         wrapped_obs_spec = env.observation_spec()
@@ -84,22 +85,22 @@ class FrameStackWrapper(dm_env.Environment):
             pixels_shape = pixels_shape[1:]
         self._obs_spec = specs.BoundedArray(shape=np.concatenate(
             [[pixels_shape[2] * num_frames], pixels_shape[:2]], axis=0),
-                                            dtype=np.uint8,
-                                            minimum=0,
-                                            maximum=255,
-                                            name='observation')
+            dtype=np.uint8,
+            minimum=0,
+            maximum=255,
+            name='observation')
 
     def _transform_observation(self, time_step):
         assert len(self._frames) == self._num_frames
         obs = np.concatenate(list(self._frames), axis=0)
         return time_step._replace(observation=obs)
-    
+
     def _transform_reward(self, time_step):
         assert len(self._rewards) <= self._num_frames
         while len(self._rewards) < self._num_frames:
             self._rewards.append(time_step.reward)
 
-        r = (np.array(list(self._rewards)) * self._reward_weight).sum() # weigheted sum over stacking rewards
+        r = (np.array(list(self._rewards)) * self._reward_weight).sum()  # weigheted sum over stacking rewards
         return time_step._replace(reward=r)
 
     def _extract_pixels(self, time_step):
@@ -131,7 +132,7 @@ class FrameStackWrapper(dm_env.Environment):
 
     def __getattr__(self, name):
         return getattr(self._env, name)
-    
+
     def __getstate__(self):
         return self.__dict__
 
@@ -144,10 +145,10 @@ class ActionDTypeWrapper(dm_env.Environment):
         self._env = env
         wrapped_action_spec = env.action_spec()
         self._action_spec = specs.BoundedArray(wrapped_action_spec.shape,
-                                            dtype,
-                                            wrapped_action_spec.minimum,
-                                            wrapped_action_spec.maximum,
-                                            'action')
+                                               dtype,
+                                               wrapped_action_spec.minimum,
+                                               wrapped_action_spec.maximum,
+                                               'action')
 
     def step(self, action):
         action = action.astype(self._env.action_spec().dtype)
@@ -254,16 +255,15 @@ def make_env(env_name, seed, action_repeat):
 
     if (domain, task) in suite.ALL_TASKS:
         env = suite.load(domain,
-                        task,
-                        task_kwargs={'random': seed},
-                        visualize_reward=False)
+                         task,
+                         task_kwargs={'random': seed},
+                         visualize_reward=False)
     else:
         raise ValueError
-    
+
     env = ActionDTypeWrapper(env, np.float32)
     env = ActionRepeatWrapper(env, action_repeat)
     env = ExtendedTimeStepWrapper(env)
     env = ConcatObsWrapper(env)
 
     return env
-    

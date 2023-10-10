@@ -1,12 +1,14 @@
-import re
 import os
+import re
 import time
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import distributions as pyd
 from torch.distributions.utils import _standard_normal
+
 try:
     import cPickle as pickle
 except ModuleNotFoundError:
@@ -26,6 +28,7 @@ def cosine(pred, target, reduce=False):
 
     return 2 - 2 * (x * y).sum(dim=-1, keepdim=(not reduce))
 
+
 def soft_update_params(m, m_target, tau):
     """Update slow-moving average of online network (target network) at rate tau."""
     with torch.no_grad():
@@ -39,7 +42,7 @@ def set_requires_grad(net, value):
         param.requires_grad_(value)
 
 
-def soft_clamp(x : torch.Tensor, _min=None, _max=None):
+def soft_clamp(x: torch.Tensor, _min=None, _max=None):
     # clamp tensor values while mataining the gradient
     if _max is not None:
         x = _max - F.softplus(_max - x)
@@ -50,6 +53,7 @@ def soft_clamp(x : torch.Tensor, _min=None, _max=None):
 
 class TruncatedNormal(pyd.Normal):
     """Utility class implementing the truncated normal distribution."""
+
     def __init__(self, loc, scale, low=-1.0, high=1.0, eps=1e-6):
         super().__init__(loc, scale, validate_args=False)
         self.low = low
@@ -64,8 +68,8 @@ class TruncatedNormal(pyd.Normal):
     def sample(self, clip=None, sample_shape=torch.Size()):
         shape = self._extended_shape(sample_shape)
         eps = _standard_normal(shape,
-                            dtype=self.loc.dtype,
-                            device=self.loc.device)
+                               dtype=self.loc.dtype,
+                               device=self.loc.device)
         eps *= self.scale
         if clip is not None:
             eps = torch.clamp(eps, -clip, clip)
@@ -75,14 +79,15 @@ class TruncatedNormal(pyd.Normal):
 
 class Flatten(nn.Module):
     """Module that flattens its input to a (batched) vector."""
+
     def __init__(self):
         super().__init__()
-        
+
     def forward(self, x):
         return x.view(x.size(0), -1)
-        
 
-def save_object(obj, filename): 
+
+def save_object(obj, filename):
     with open(filename, 'wb') as f:
         pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL)
 

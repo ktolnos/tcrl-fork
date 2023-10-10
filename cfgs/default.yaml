@@ -1,12 +1,12 @@
 defaults:
-    - _self_
-    - task: walker_walk
+  - _self_
+  - task: walker_walk
 
-    # disable hydra logging
-    - override hydra/hydra_logging: disabled  
-    - override hydra/job_logging: disabled  
+  # disable hydra logging
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
 
-seed: -1 # generate random seed if seed == -1 (by defalut)
+seed: 1 # generate random seed if seed == -1 (by defalut)
 
 env_name: ${env_name}
 algo_name: tcrl
@@ -27,7 +27,7 @@ eval_episode: 10
 update_every_steps: 2
 
 batch_size: 512
-reward_coef: 1.0 
+reward_coef: 1.0
 state_coef: 1.0
 horizon: 5
 tau: 0.005
@@ -40,7 +40,7 @@ buffer_num_workers: 4
 lr: 3e-4
 weight_decay: 1e-6 # only used when updating encoder and latent dynamics
 
-mlp_dims: [512, 512]
+mlp_dims: [ 512, 512 ]
 latent_dim: ${latent_dim}
 
 std_clip: 0.3
@@ -56,7 +56,7 @@ save_logging: true
 
 run_suffix: 0
 # ref: https://stackoverflow.com/questions/65104134/disable-file-output-of-hydra
-hydra:  
-    output_subdir: null  
-    run:  
-        dir: .
+hydra:
+  output_subdir: null
+  run:
+    dir: .

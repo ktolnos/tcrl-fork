@@ -4,7 +4,8 @@ import numpy as np
 
 class VideoRecorder:
     """Utility class for logging evaluation videos."""
-    def __init__(self, root_dir, wandb=None, render_size=256, fps=20): 
+
+    def __init__(self, root_dir, wandb=None, render_size=256, fps=20):
         self.save_dir = (root_dir / 'eval_video') if root_dir else None
         self.save_dir.mkdir(exist_ok=True, parents=True)
         self._wandb = wandb

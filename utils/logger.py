@@ -1,14 +1,11 @@
-#Adapted from https://github.com/facebookresearch/drqv2
+# Adapted from https://github.com/facebookresearch/drqv2
 
 import csv
 import datetime
 from collections import defaultdict
 
-import numpy as np
 import torch
-import torchvision
 from termcolor import colored
-
 
 COMMON_TRAIN_FORMAT = [('frame', 'F', 'int'), ('step', 'S', 'int'),
                        ('episode', 'E', 'int'), ('episode_length', 'L', 'int'),
@@ -120,7 +117,6 @@ class MetersGroup(object):
         self._meters.clear()
 
 
-
 class Logger(object):
     def __init__(self, log_dir, use_tb=False):
         self._log_dir = log_dir
@@ -171,7 +167,7 @@ class LogAndDumpCtx:
 
     def __call__(self, key, value):
         self._logger.log(f'{self._ty}/{key}', value, self._step)
-    
+
     def log_metrics(self, metrics):
         self._logger.log_metrics(metrics, self._step, self._ty)
 
