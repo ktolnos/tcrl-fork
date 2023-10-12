@@ -143,6 +143,7 @@ def main(cfg):
         ###### update model ######
         if ep >= cfg.random_episode:
             timer.reset()
+            train_info = dict()
             for _ in range(cfg.episode_length // cfg.update_every_steps):
                 if replay_iter is None:
                     replay_iter = iter(replay_loader)
@@ -150,7 +151,7 @@ def main(cfg):
             elapsed_time = timer.reset()
             total_training_time += elapsed_time
             # logging
-            if cfg.save_logging:
+            if cfg.save_logging or cfg.use_wandb:
                 episode_len = ep_step * cfg.action_repeat
                 train_info.update({'episode_reward': ep_reward,
                                    'fps': episode_len / elapsed_time,
@@ -162,8 +163,9 @@ def main(cfg):
                                    'step': global_step,
                                    'env_step': global_step * cfg.action_repeat})
                 # save to logger and wandb
-                with logger.log_and_dump_ctx(global_step * cfg.action_repeat, ty='train') as log:
-                    log.log_metrics(train_info)
+                if cfg.save_logging:
+                    with logger.log_and_dump_ctx(global_step * cfg.action_repeat, ty='train') as log:
+                        log.log_metrics(train_info)
                 if cfg.use_wandb: wandb.log({'train/': train_info})
 
         ###### evaluation ######
@@ -172,7 +174,7 @@ def main(cfg):
             Gs = utils.evaluate(eval_env, agent, ep=ep, num_episode=cfg.eval_episode, video=video_recorder)
             elapsed_time = timer.reset()
             total_eval_time += elapsed_time
-            if cfg.save_logging:
+            if cfg.save_logging or cfg.use_wandb:
                 eval_metrics = {
                     'episode': ep,
                     'step': global_step,
@@ -180,8 +182,9 @@ def main(cfg):
                     'time': time.time() - start_time,
                     'episode_reward': np.mean(Gs),
                     'eval_total_time': total_eval_time}
-                with logger.log_and_dump_ctx(global_step * cfg.action_repeat, ty='eval') as log:
-                    log.log_metrics(eval_metrics)
+                if cfg.save_logging:
+                    with logger.log_and_dump_ctx(global_step * cfg.action_repeat, ty='eval') as log:
+                        log.log_metrics(eval_metrics)
                 if cfg.use_wandb: wandb.log({"eval/": eval_metrics})
 
         ###### save model and buffers ######

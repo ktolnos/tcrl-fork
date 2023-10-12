@@ -52,7 +52,7 @@ use_wandb: true
 save_buffer: false
 save_model: false
 save_interval: 500
-save_logging: true
+save_logging: false
 
 run_suffix: 0
 # ref: https://stackoverflow.com/questions/65104134/disable-file-output-of-hydra
