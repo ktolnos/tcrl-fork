@@ -1,6 +1,8 @@
 import os
 import sys
 
+from utils.helper import Timer
+
 sys.path.insert(0, os.path.abspath(".."))
 import numpy as np
 import torch
@@ -113,6 +115,14 @@ class TCRL(object):
         # policy related
         self.gamma, self.nstep = gamma, nstep
 
+        self.data_loading_time = 0
+        self.torching_time = 0
+        self.enc_latent_time = 0
+        self.z_prep_time = 0
+        self.q_time = 0
+        self.pi_time = 0
+        self.soft_time = 0
+
     def save(self, fp):
         torch.save({
             'encoder': self.encoder.state_dict(),
@@ -167,7 +177,7 @@ class TCRL(object):
         total_loss.register_hook(lambda grad: grad * (1 / self.horizon))
         total_loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(list(self.encoder.parameters()) + list(self.trans.parameters()),
-                                                   self.grad_clip_norm, error_if_nonfinite=False)
+                                                   self.grad_clip_norm, error_if_nonfinite=True)
 
         self.enc_trans_optim.step()
 
@@ -208,18 +218,22 @@ class TCRL(object):
         return {'pi_loss': pi_loss.item()}
 
     def update(self, step, replay_iter, batch_size):
+        info = dict()
+        timer = Timer()
         self.std = h.linear_schedule(self.std_schedule, step)  # linearly udpate std
-        info = {'std': self.std}
 
         # obs, action, next_obses, reward = replay_buffer.sample(batch_size) 
         batch = next(replay_iter)
+        self.data_loading_time += timer.reset()
         obs, action, reward, discount, next_obses = to_torch(batch, self.device, dtype=torch.float32)
         # swap the batch and horizon dimension -> [H, B, _shape]
         action, reward, discount, next_obses = torch.swapaxes(action, 0, 1), torch.swapaxes(reward, 0, 1), \
             torch.swapaxes(discount, 0, 1), torch.swapaxes(next_obses, 0, 1)
+        self.torching_time += timer.reset()
 
         # update encoder and latent dynamics
         info.update(self._update_enc_trans(obs, action, next_obses, reward))
+        self.enc_latent_time += timer.reset()
 
         # form n-step samples
         z0, zt = self.enc(obs), self.enc(next_obses[self.nstep - 1])
@@ -227,15 +241,29 @@ class TCRL(object):
         for t in range(self.nstep):
             _rew += _discount * reward[t]
             _discount *= self.gamma
+        self.z_prep_time += timer.reset()
         # udpate policy and value functions
         info.update(self._update_q(z0, action[0], _rew, _discount, zt))
+        self.q_time += timer.reset()
         info.update(self._update_pi(z0))
+        self.pi_time += timer.reset()
 
         # update target networks
         h.soft_update_params(self.encoder, self.encoder_tar, self.tau)
         h.soft_update_params(self.critic, self.critic_tar, self.tau)
+        self.soft_time += timer.reset()
 
         self.counter += 1
+        info.update({
+            'std': self.std,
+            'data_loading_time': self.data_loading_time,
+            'torching_time': self.torching_time,
+            'enc_latent_time': self.enc_latent_time,
+            'z_prep_time': self.z_prep_time,
+            'q_time': self.q_time,
+            'pi_time': self.pi_time,
+            'soft_time': self.soft_time,
+        })
 
         return info
 

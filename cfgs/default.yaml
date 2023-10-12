@@ -6,7 +6,7 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
-seed: 1 # generate random seed if seed == -1 (by defalut)
+seed: 43 # generate random seed if seed == -1 (by defalut)
 
 env_name: ${env_name}
 algo_name: tcrl

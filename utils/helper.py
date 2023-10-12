@@ -133,10 +133,12 @@ class Timer:
         self._last_time = time.time()
 
     def reset(self):
-        elapsed_time = time.time() - self._last_time
+        elapsed_time = self.elapsed_time()
         self._last_time = time.time()
-        total_time = time.time() - self._start_time
-        return elapsed_time, total_time
+        return elapsed_time
 
     def total_time(self):
         return time.time() - self._start_time
+
+    def elapsed_time(self):
+        return time.time() - self._last_time

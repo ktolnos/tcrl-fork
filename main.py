@@ -117,12 +117,14 @@ def main(cfg):
     ###################################
     timer = helper.Timer()
     global_step, start_time = 0, time.time()
+    total_training_time, total_eval_time, data_collection_time = 0, 0, 0
 
     for ep in range(cfg.train_episode + 1):
         ###### collect an episodic trajectory ######
         time_step = env.reset()
         replay_storage.add(time_step)
         ep_step, ep_reward = 0, 0
+        timer.reset()
         while not time_step.last():
             if ep < cfg.random_episode:
                 action = np.random.uniform(-1, 1, env.action_spec().shape).astype(dtype=env.action_spec().dtype)
@@ -136,20 +138,25 @@ def main(cfg):
             global_step += 1
             ep_reward += time_step.reward
             ep_step += 1
+        data_collection_time += timer.reset()
 
         ###### update model ######
         if ep >= cfg.random_episode:
+            timer.reset()
             for _ in range(cfg.episode_length // cfg.update_every_steps):
                 if replay_iter is None:
                     replay_iter = iter(replay_loader)
                 train_info = agent.update(ep, replay_iter, cfg.batch_size)  # log training every episode
+            elapsed_time = timer.reset()
+            total_training_time += elapsed_time
             # logging
             if cfg.save_logging:
-                elapsed_time, total_time = timer.reset()
                 episode_len = ep_step * cfg.action_repeat
                 train_info.update({'episode_reward': ep_reward,
                                    'fps': episode_len / elapsed_time,
-                                   'total_time': total_time,
+                                   'total_time': timer.total_time(),
+                                   'total_training_time': total_training_time,
+                                   'data_collection_time': data_collection_time,
                                    'episode_length': episode_len,
                                    'episode': ep,
                                    'step': global_step,
@@ -161,8 +168,10 @@ def main(cfg):
 
         ###### evaluation ######
         if ep % cfg.eval_interval == 0:
+            timer.reset()
             Gs = utils.evaluate(eval_env, agent, ep=ep, num_episode=cfg.eval_episode, video=video_recorder)
-
+            elapsed_time = timer.reset()
+            total_eval_time += elapsed_time
             if cfg.save_logging:
                 eval_metrics = {
                     'episode': ep,
@@ -170,7 +179,7 @@ def main(cfg):
                     'env_step': global_step * cfg.action_repeat,
                     'time': time.time() - start_time,
                     'episode_reward': np.mean(Gs),
-                    'eval_total_time': timer.total_time()}
+                    'eval_total_time': total_eval_time}
                 with logger.log_and_dump_ctx(global_step * cfg.action_repeat, ty='eval') as log:
                     log.log_metrics(eval_metrics)
                 if cfg.use_wandb: wandb.log({"eval/": eval_metrics})

@@ -180,12 +180,13 @@ def make_replay_loader(replay_dir, max_size, batch_size, num_workers,
                             num_workers,
                             nstep,
                             discount,
-                            fetch_every=1000,
+                            fetch_every=4096,
                             save_snapshot=save_snapshot)
 
     loader = torch.utils.data.DataLoader(iterable,
                                          batch_size=batch_size,
                                          num_workers=num_workers,
                                          pin_memory=True,
+                                         prefetch_factor=4,
                                          worker_init_fn=_worker_init_fn)
     return loader
