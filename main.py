@@ -60,8 +60,8 @@ def main(cfg):
     video_recorder = VideoRecorder(work_dir) if cfg.save_video else None
 
     ###### initialize environments ######
-    env = utils.make_env(cfg.env_name, cfg.seed, cfg.action_repeat)
-    eval_env = utils.make_env(cfg.env_name, cfg.seed + 100, cfg.action_repeat)
+    env = utils.make_env(cfg.env_name, cfg.seed, cfg)
+    eval_env = utils.make_env(cfg.env_name, cfg.seed + 100, cfg)
 
     cfg.obs_shape = tuple(int(x) for x in env.observation_spec().shape)
     cfg.action_shape = tuple(int(x) for x in env.action_spec().shape)

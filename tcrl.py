@@ -242,7 +242,7 @@ class TCRL(object):
             _rew += _discount * reward[t]
             _discount *= self.gamma
         self.z_prep_time += timer.reset()
-        # udpate policy and value functions
+        # update policy and value functions
         info.update(self._update_q(z0, action[0], _rew, _discount, zt))
         self.q_time += timer.reset()
         info.update(self._update_pi(z0))

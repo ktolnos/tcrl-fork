@@ -245,7 +245,98 @@ class ConcatObsWrapper(dm_env.Environment):
         return time_step._replace(observation=np.concatenate([v.flatten() for v in obs.values()]))
 
 
-def make_env(env_name, seed, action_repeat):
+class DistractorWrapper(dm_env.Environment):
+    def __init__(self,
+                 env: dm_env.Environment,
+                 dimensions=10,
+                 pure_noise=False,
+                 switching=True,
+                 correlated=False,
+                 linear=False,
+                 random_walk=False,
+                 reward_noise=False,
+                 obs_noise=False,
+                 ):
+        self.obs_noise = obs_noise
+        self.correlated = correlated
+        self.reward_noise = reward_noise
+        self.random_walk = random_walk
+        self.linear = linear
+        self.switching = switching
+        self.pure_noise = pure_noise
+        self._env = env
+        self.dimensions = dimensions
+        self.obs_shape = (dimensions + env.observation_spec().shape[0],)
+
+    def step(self, action):
+        time_step = self._env.step(action)
+        return self._add_noise(time_step)
+
+    def reset(self):
+        time_step = self._env.reset()
+        self.distractor_state = np.random.normal(0, 0.1, size=(self.dimensions,))
+        self.reset_switching = np.random.normal(size=(self.dimensions,))
+        self.random_sin_parameters = np.random.normal(0, 10., size=(1, self.dimensions, self.dimensions)) ** 2
+        self.linear_map = np.random.normal(0, 1., size=(self.dimensions,
+                                                        self._env.observation_spec().shape[0] + self.dimensions))
+        if not self.correlated:
+            self.linear_map[:, :self._env.observation_spec().shape[0]] = 0.
+        time_step = self._add_noise(time_step)
+        return time_step
+
+    def observation_spec(self):
+        return dm_env.specs.Array(shape=self.obs_shape, dtype='float64', name='observation')
+
+    def action_spec(self):
+        return self._env.action_spec()
+
+    def __getattr__(self, name):
+        return getattr(self._env, name)
+
+    def __getstate__(self):
+        return self.__dict__
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
+    def _add_noise(self, time_step):
+        obs = time_step.observation
+        reward_noise = 0
+
+        if self.random_walk:
+            self.distractor_state += np.random.normal(0, 1., size=(self.dimensions,))
+            self.distractor_state = np.clip(self.distractor_state, -1, 1)
+
+            if self.reward_noise:
+                reward_noise += (self.distractor_state[0] + self.distractor_state[1]) / 2
+            if self.obs_noise:
+                obs = (obs + np.resize(self.distractor_state, obs.shape)) / 2
+        else:
+            self.distractor_state = np.matmul(self.linear_map, np.concatenate((obs, self.distractor_state)))
+
+            if not self.linear:
+                self.distractor_state += 0.1 * np.sum(np.sin(np.matmul(self.random_sin_parameters, self.distractor_state)),
+                                                      0)
+
+            if self.switching:
+                self.distractor_state = np.where(np.abs(self.distractor_state) > 1., self.reset_switching,
+                                                 self.distractor_state)
+            else:
+                self.distractor_state = np.clip(self.distractor_state, -1, 1)
+
+        if self.pure_noise:
+            self.distractor_state = np.random.normal(0, 1., size=(self.dimensions,))
+            if self.reward_noise:
+                reward_noise += (self.distractor_state[0] + self.distractor_state[1]) / 2
+
+        reward_noise = np.clip(reward_noise, -1, 1)
+
+        return time_step._replace(
+            observation=np.concatenate((obs, self.distractor_state)),
+            reward=time_step.reward + reward_noise
+        )
+
+def make_env(env_name, seed, cfg):
     """
     Make environment for TCRL experiments.
     Adapted from https://github.com/facebookresearch/drqv2
@@ -262,8 +353,20 @@ def make_env(env_name, seed, action_repeat):
         raise ValueError
 
     env = ActionDTypeWrapper(env, np.float32)
-    env = ActionRepeatWrapper(env, action_repeat)
+    env = ActionRepeatWrapper(env, cfg.action_repeat)
     env = ExtendedTimeStepWrapper(env)
     env = ConcatObsWrapper(env)
+
+    if cfg.use_distraction:
+        env = DistractorWrapper(env,
+                                dimensions=cfg.distraction_dimensions,
+                                pure_noise=cfg.distraction_pure_noise,
+                                switching=cfg.distraction_switching,
+                                correlated=cfg.distraction_correlated,
+                                linear=cfg.distraction_linear,
+                                random_walk=cfg.distraction_random_walk,
+                                reward_noise=cfg.distraction_reward_noise,
+                                obs_noise=cfg.distraction_obs_noise,
+                                )
 
     return env

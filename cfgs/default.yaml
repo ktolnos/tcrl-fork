@@ -6,11 +6,11 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
-seed: 43 # generate random seed if seed == -1 (by defalut)
+seed: -1 # generate random seed if seed == -1 (by defalut)
 
 env_name: ${env_name}
 algo_name: tcrl
-exp_name: default
+exp_name: distractor_random_walk_obs_noise
 
 # training
 device: ???
@@ -45,6 +45,17 @@ latent_dim: ${latent_dim}
 
 std_clip: 0.3
 std_schedule: ${std_schedule}
+
+# distraction
+use_distraction: false
+distraction_dimensions: 10
+distraction_pure_noise: false
+distraction_switching: true
+distraction_correlated: false
+distraction_linear: false
+distraction_random_walk: true
+distraction_reward_noise: true
+distraction_obs_noise: true
 
 # options
 save_video: false
