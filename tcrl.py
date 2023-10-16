@@ -1,7 +1,7 @@
 import os
 import sys
 
-from utils.helper import Timer
+from utils.helper import Timer, FreezeParameters
 
 sys.path.insert(0, os.path.abspath(".."))
 import numpy as np
@@ -153,6 +153,7 @@ class TCRL(object):
         state_loss, reward_loss = 0, 0
 
         z = self.encoder(obs)
+        mse = 0
 
         for t in range(self.horizon):
             next_z_pred, r_pred = self.trans(z, action[t])
@@ -167,6 +168,7 @@ class TCRL(object):
             rho = (self.rho ** t)
             state_loss += rho * torch.mean(h.cosine(next_z_pred, next_z_tar), dim=-1)
             reward_loss += rho * torch.mean(h.mse(r_pred, r_tar), dim=-1)
+            mse += rho * h.mse(next_z_pred, next_z_tar).mean()
 
             # don't forget this
             z = next_z_pred
@@ -185,6 +187,7 @@ class TCRL(object):
         return {
             'trans_loss': float(total_loss.mean().item()),
             'consistency_loss': float(state_loss.mean().item()),
+            'mse_consistency_loss': float(mse.item()),
             'reward_loss': float(reward_loss.mean().item()),
             'trans_grad_norm': float(grad_norm),
             'z_mean': z.mean().item(), 'z_max': z.max().item(), 'z_min': z.min().item()
@@ -206,6 +209,44 @@ class TCRL(object):
 
         return {'q': q1.mean().item(), 'q_loss': q_loss.item()}
 
+    def _update_q_mve(self, z):
+        zs, acts, rs, qs = [z], [], [], []
+
+        with torch.no_grad():
+            for t in range(self.nstep):
+                act = self.actor(z, self.std).sample(self.std_clip)
+                acts.append(act)
+                z, r = self.trans(z, act)
+                zs.append(z)
+                rs.append(r)
+
+            # calculate td_target
+            next_q = torch.min(*self.critic_tar(z, self.actor(z, self.std).sample(self.std_clip)))
+
+            td_targets = []
+            for t in reversed(range(len(rs))):
+                next_q = rs[t] + self.gamma * next_q
+                td_targets.append(next_q)
+            td_targets = list(reversed(td_targets))
+
+        # calculate the td error
+        q_loss = 0
+        for t, td_target in enumerate(td_targets):
+            q1, q2 = self.critic(zs[t], acts[t])
+            q_loss = h.mse(q1, td_target) + h.mse(q2, td_target)
+        q_loss = torch.mean(q_loss)
+        # H-step td
+        # q1, q2 = self.critic(zs[0], acts[0])
+        # q_loss = torch.mean(h.mse(q1, td_targets[0]) + h.mse(q2, td_targets[0]))
+
+        self.critic_optim.zero_grad(set_to_none=True)
+        q_loss.register_hook(lambda grad: grad * (1 / self.nstep))
+        q_loss.backward()
+        self.critic_optim.step()
+
+        return {'q': q1.mean().item(), 'q_loss': q_loss.item()}
+
+
     def _update_pi(self, z):
         a = self.actor(z, std=self.std).sample(clip=self.std_clip)
         Q = torch.min(*self.critic(z, a))
@@ -216,6 +257,22 @@ class TCRL(object):
         self.actor_optim.step()
 
         return {'pi_loss': pi_loss.item()}
+
+    def _rollout_on_policy(self, z0):
+        z = z0
+        z_seq = [z]
+        r_seq = []
+        action_seq = []
+        # with FreezeParameters([self.trans]):
+        with torch.no_grad():
+            for t in range(self.nstep):
+                action = self.actor(z, std=self.std).sample(clip=self.std_clip)
+                next_z_pred, r_pred = self.trans(z, action)
+                z = next_z_pred
+                z_seq.append(z)
+                r_seq.append(r_pred)
+                action_seq.append(action)
+        return z_seq, r_seq, action_seq
 
     def update(self, step, replay_iter, batch_size):
         info = dict()
@@ -236,14 +293,19 @@ class TCRL(object):
         self.enc_latent_time += timer.reset()
 
         # form n-step samples
-        z0, zt = self.enc(obs), self.enc(next_obses[self.nstep - 1])
-        _rew, _discount = 0, 1
-        for t in range(self.nstep):
-            _rew += _discount * reward[t]
-            _discount *= self.gamma
-        self.z_prep_time += timer.reset()
-        # update policy and value functions
-        info.update(self._update_q(z0, action[0], _rew, _discount, zt))
+        z0 = self.enc(obs)
+        if step > 50: # and False: #info['trans_loss'] < 0.2:
+            info.update(self._update_q_mve(z0))
+        else:
+            zt = self.enc(next_obses[self.nstep - 1])
+            _rew, _discount = 0, 1
+            for t in range(self.nstep):
+                _rew += _discount * reward[t]
+                _discount *= self.gamma
+            self.z_prep_time += timer.reset()
+            # udpate policy and value functions
+            info.update(self._update_q(z0, action[0], _rew, _discount, zt))
+
         self.q_time += timer.reset()
         info.update(self._update_pi(z0))
         self.pi_time += timer.reset()

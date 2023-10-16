@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - task: walker_walk
+  - task: cheetah_run
 
   # disable hydra logging
   - override hydra/hydra_logging: disabled
@@ -10,7 +10,7 @@ seed: -1 # generate random seed if seed == -1 (by defalut)
 
 env_name: ${env_name}
 algo_name: tcrl
-exp_name: distractor_random_walk_obs_noise
+exp_name: mve
 
 # training
 device: ???
