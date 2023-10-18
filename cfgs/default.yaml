@@ -10,7 +10,7 @@ seed: -1 # generate random seed if seed == -1 (by defalut)
 
 env_name: ${env_name}
 algo_name: tcrl
-exp_name: mve
+exp_name: mve_min-norm_z
 
 # training
 device: ???
@@ -27,7 +27,7 @@ eval_episode: 10
 update_every_steps: 2
 
 batch_size: 512
-reward_coef: 1.0
+reward_coef: 20.0
 state_coef: 1.0
 horizon: 5
 tau: 0.005
@@ -56,6 +56,10 @@ distraction_linear: false
 distraction_random_walk: true
 distraction_reward_noise: true
 distraction_obs_noise: true
+
+value_expansion: mve # td-k, mve, double-mve
+value_aggregation: min # min, mean, max
+normalize_z: true
 
 # options
 save_video: false

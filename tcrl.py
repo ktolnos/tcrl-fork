@@ -47,19 +47,24 @@ class Critic(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, obs_shape, mlp_dims, latent_dim):
+    def __init__(self, obs_shape, mlp_dims, latent_dim, normalize_z):
         super().__init__()
+        self.normalize_z = normalize_z
         self._encoder = net.mlp(obs_shape[0], mlp_dims, latent_dim, )
         self.apply(net.orthogonal_init)
 
     def forward(self, obs):
         out = self._encoder(obs)
+        if self.normalize_z:
+            return torch.nn.functional.normalize(out) * out.shape[-1]
         return out
 
 
+
 class LatentModel(nn.Module):
-    def __init__(self, latent_dim, action_shape, mlp_dims, ):
+    def __init__(self, latent_dim, action_shape, mlp_dims, normalize_z):
         super().__init__()
+        self.normalize_z = normalize_z
         self._dynamics = net.mlp(latent_dim + action_shape[0], mlp_dims, latent_dim)
         self._reward = net.mlp(latent_dim + action_shape[0], mlp_dims, 1)
         self.apply(net.orthogonal_init)
@@ -70,6 +75,8 @@ class LatentModel(nn.Module):
 
         x = torch.cat([z, action], dim=-1)  # shape[B, xdim]
         next_z = self._dynamics(x)
+        if self.normalize_z:
+            next_z = torch.nn.functional.normalize(next_z) * z.shape[-1]
         reward = self._reward(x)
         return next_z, reward
 
@@ -79,14 +86,19 @@ class TCRL(object):
                  lr, weight_decay=1e-6, tau=0.005, rho=0.9, gamma=0.99,
                  nstep=3, horizon=5, state_coef=1.0, reward_coef=1.0, grad_clip_norm=10.,
                  std_schedule="", std_clip=0.3,
-                 device='cuda'):
+                 device='cuda', value_expansion='td-k', value_aggregation='min', normalize_z=False):
+        if value_expansion == 'double-mve' and value_aggregation == 'mean':
+            raise ValueError(f'Cant use {value_expansion} with {value_aggregation}')
+        self.value_expansion = value_expansion
+        self.value_aggregation = value_aggregation
         self.device = torch.device(device)
 
         # models
-        self.encoder = Encoder(obs_shape, mlp_dims, latent_dim).to(self.device)
-        self.encoder_tar = Encoder(obs_shape, mlp_dims, latent_dim).to(self.device)
+        self.encoder = Encoder(obs_shape, mlp_dims, latent_dim, normalize_z).to(self.device)
+        self.encoder_tar = Encoder(obs_shape, mlp_dims, latent_dim, normalize_z).to(self.device)
 
-        self.trans = LatentModel(latent_dim, action_shape, mlp_dims, ).to(self.device)
+        self.trans1 = LatentModel(latent_dim, action_shape, mlp_dims, normalize_z).to(self.device)
+        self.trans2 = LatentModel(latent_dim, action_shape, mlp_dims, normalize_z).to(self.device)
 
         self.actor = Actor(latent_dim, mlp_dims, action_shape).to(self.device)
 
@@ -95,7 +107,8 @@ class TCRL(object):
 
         # init optimizer
         self.enc_trans_optim = torch.optim.Adam(list(self.encoder.parameters()) + \
-                                                list(self.trans.parameters()), lr=lr, weight_decay=weight_decay)
+                                                list(self.trans1.parameters()) + \
+                                                list(self.trans2.parameters()), lr=lr, weight_decay=weight_decay)
         self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=lr)
 
@@ -145,10 +158,20 @@ class TCRL(object):
             obs = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
         return self.encoder(obs)
 
+    def aggregate_values(self, tensor1, tensor2):
+        if self.value_aggregation == 'min':
+            return torch.min(tensor1, tensor2)
+        if self.value_aggregation == 'max':
+            return torch.min(tensor1, tensor2)
+        if self.value_aggregation == 'mean':
+            return (tensor1 + tensor2) / 2
+        raise ValueError(f'Incorrect value aggregation {self.value_aggregation}')
+
     def _update_enc_trans(self, obs, action, next_obses, reward):
 
         self.enc_trans_optim.zero_grad(set_to_none=True)
-        self.trans.train()
+        self.trans1.train()
+        self.trans2.train()
 
         state_loss, reward_loss = 0, 0
 
@@ -156,7 +179,8 @@ class TCRL(object):
         mse = 0
 
         for t in range(self.horizon):
-            next_z_pred, r_pred = self.trans(z, action[t])
+            next_z_pred1, r_pred1 = self.trans1(z, action[t])
+            next_z_pred2, r_pred2 = self.trans2(z, action[t])
 
             with torch.no_grad():
                 next_obs = next_obses[t]
@@ -166,24 +190,29 @@ class TCRL(object):
 
             # Losses
             rho = (self.rho ** t)
-            state_loss += rho * torch.mean(h.cosine(next_z_pred, next_z_tar), dim=-1)
-            reward_loss += rho * torch.mean(h.mse(r_pred, r_tar), dim=-1)
-            mse += rho * h.mse(next_z_pred, next_z_tar).mean()
+            state_loss += rho * torch.mean(h.cosine(next_z_pred1, next_z_tar) + h.cosine(next_z_pred2, next_z_tar), dim=-1)
+            reward_loss += rho * torch.mean(h.mse(r_pred1, r_tar) + h.mse(r_pred2, r_tar), dim=-1)
+            mse += rho * h.mse(next_z_pred1, next_z_tar).mean()
 
             # don't forget this
-            z = next_z_pred
+            batch_size = z.shape[0]
+            z2_idx = np.random.choice(batch_size, batch_size // 2, replace=False)
+            z = next_z_pred1
+            z = z.clone()
+            z[z2_idx] = next_z_pred2[z2_idx]
 
         total_loss = (self.state_coef * state_loss.clamp(max=1e4) + \
                       self.reward_coef * reward_loss.clamp(max=1e4)).mean()
 
         total_loss.register_hook(lambda grad: grad * (1 / self.horizon))
         total_loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(list(self.encoder.parameters()) + list(self.trans.parameters()),
+        grad_norm = torch.nn.utils.clip_grad_norm_(list(self.encoder.parameters()) + list(self.trans1.parameters()) + list(self.trans2.parameters()),
                                                    self.grad_clip_norm, error_if_nonfinite=True)
 
         self.enc_trans_optim.step()
 
-        self.trans.eval()
+        self.trans1.eval()
+        self.trans2.eval()
         return {
             'trans_loss': float(total_loss.mean().item()),
             'consistency_loss': float(state_loss.mean().item()),
@@ -197,8 +226,7 @@ class TCRL(object):
         with torch.no_grad():
             action = self.actor(next_z, std=self.std).sample(clip=self.std_clip)
 
-            td_target = rew + discount * \
-                        torch.min(*self.critic_tar(next_z, action))
+            td_target = rew + discount * self.aggregate_values(*self.critic_tar(next_z, action))
 
         q1, q2 = self.critic(z, act)
         q_loss = torch.mean(h.mse(q1, td_target) + h.mse(q2, td_target))
@@ -216,12 +244,62 @@ class TCRL(object):
             for t in range(self.nstep):
                 act = self.actor(z, self.std).sample(self.std_clip)
                 acts.append(act)
-                z, r = self.trans(z, act)
+                z, r = self.trans1(z, act)
                 zs.append(z)
                 rs.append(r)
 
             # calculate td_target
-            next_q = torch.min(*self.critic_tar(z, self.actor(z, self.std).sample(self.std_clip)))
+            next_q = self.aggregate_values(*self.critic_tar(z, self.actor(z, self.std).sample(self.std_clip)))
+
+            td_targets = []
+            for t in reversed(range(len(rs))):
+                next_q = rs[t] + self.gamma * next_q
+                td_targets.append(next_q)
+            td_targets = list(reversed(td_targets))
+
+        # calculate the td error
+        q_loss = 0
+        for t, td_target in enumerate(td_targets):
+            q1, q2 = self.critic(zs[t], acts[t])
+            q_loss += h.mse(q1, td_target) + h.mse(q2, td_target)
+        q_loss = torch.mean(q_loss)
+        # H-step td
+        # q1, q2 = self.critic(zs[0], acts[0])
+        # q_loss = torch.mean(h.mse(q1, td_targets[0]) + h.mse(q2, td_targets[0]))
+
+        self.critic_optim.zero_grad(set_to_none=True)
+        q_loss.register_hook(lambda grad: grad / self.nstep)
+        q_loss.backward()
+        self.critic_optim.step()
+
+        return {'q': q1.mean().item(), 'q_loss': q_loss.item()}
+
+
+    def _update_q_double_mve(self, z):
+        zs, acts, rs = [z], [], []
+        act = self.actor(z, self.std).sample(self.std_clip)
+        acts.append(act)
+
+        with torch.no_grad():
+            for t in range(self.nstep):
+                z1, r1 = self.trans1(z, act)
+                z2, r2 = self.trans2(z, act)
+                act1 = self.actor(z1, self.std).sample(self.std_clip)
+                act2 = self.actor(z2, self.std).sample(self.std_clip)
+                q1 = torch.max(*self.critic_tar(z1, act1))
+                q2 = torch.max(*self.critic_tar(z2, act2))
+                z1_mask = q1 > q2
+                z2_mask = ~z1_mask
+                z = z1 * z1_mask + z2 * z2_mask
+                r = r1 * z1_mask + r2 * z2_mask
+                act = act1 * z1_mask + act2 * z2_mask
+
+                zs.append(z)
+                rs.append(r)
+                acts.append(act)
+
+            # calculate td_target
+            next_q = self.aggregate_values(*self.critic_tar(z, self.actor(z, self.std).sample(self.std_clip)))
 
             td_targets = []
             for t in reversed(range(len(rs))):
@@ -240,7 +318,7 @@ class TCRL(object):
         # q_loss = torch.mean(h.mse(q1, td_targets[0]) + h.mse(q2, td_targets[0]))
 
         self.critic_optim.zero_grad(set_to_none=True)
-        q_loss.register_hook(lambda grad: grad * (1 / self.nstep))
+        q_loss.register_hook(lambda grad: grad / self.nstep)
         q_loss.backward()
         self.critic_optim.step()
 
@@ -257,22 +335,6 @@ class TCRL(object):
         self.actor_optim.step()
 
         return {'pi_loss': pi_loss.item()}
-
-    def _rollout_on_policy(self, z0):
-        z = z0
-        z_seq = [z]
-        r_seq = []
-        action_seq = []
-        # with FreezeParameters([self.trans]):
-        with torch.no_grad():
-            for t in range(self.nstep):
-                action = self.actor(z, std=self.std).sample(clip=self.std_clip)
-                next_z_pred, r_pred = self.trans(z, action)
-                z = next_z_pred
-                z_seq.append(z)
-                r_seq.append(r_pred)
-                action_seq.append(action)
-        return z_seq, r_seq, action_seq
 
     def update(self, step, replay_iter, batch_size):
         info = dict()
@@ -294,8 +356,10 @@ class TCRL(object):
 
         # form n-step samples
         z0 = self.enc(obs)
-        if step > 50: # and False: #info['trans_loss'] < 0.2:
+        if self.value_expansion == 'mve':
             info.update(self._update_q_mve(z0))
+        elif self.value_expansion == 'double-mve':
+            info.update(self._update_q_double_mve(z0))
         else:
             zt = self.enc(next_obses[self.nstep - 1])
             _rew, _discount = 0, 1

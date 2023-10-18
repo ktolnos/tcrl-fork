@@ -21,6 +21,8 @@ import utils
 import utils.helper as helper
 from utils.video import VideoRecorder
 from utils.logger import Logger
+import statistics
+import matplotlib.pyplot as plt
 
 torch.backends.cudnn.benchmark = True
 __CONFIG__, __LOGS__ = "cfgs", "logs"
@@ -31,6 +33,48 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
+
+
+last_expected_ret = 1
+
+def log_q_bias(time_steps, agent, cfg):
+    global last_expected_ret
+    ret = 0
+    min_biases = []
+    mean_biases = []
+    max_biases = []
+    q_diff = 0
+    expected_ret = 0
+    for ts in reversed(time_steps):
+        ret += ts.reward
+        obs_t = torch.tensor(ts.observation, dtype=torch.float32, device=agent.device).unsqueeze(0)
+        act_t = torch.tensor(ts.action, dtype=torch.float32, device=agent.device).unsqueeze(0)
+        z = agent.enc(obs_t)
+        q1, q2 = agent.critic(z, act_t)
+        q1 = float(q1.item())
+        q2 = float(q2.item())
+        q_diff += abs(q1 - q2)
+        min_biases.append((min(q1, q2) - ret) / last_expected_ret)
+        max_biases.append((max(q1, q2) - ret) / last_expected_ret)
+        mean_biases.append(((q1 + q2) / 2 - ret) / last_expected_ret)
+        expected_ret += ret
+
+        ret *= cfg.gamma
+    if last_expected_ret == 1:
+        last_expected_ret = expected_ret / len(time_steps)
+    else:
+        last_expected_ret = last_expected_ret * 0.9 + (expected_ret / len(time_steps)) * 0.1
+    plt.plot(list(reversed(mean_biases)))
+    return {
+        'min_bias_avg': statistics.mean(min_biases),
+        'min_bias_std': statistics.stdev(min_biases),
+        'max_bias_avg': statistics.mean(max_biases),
+        'max_bias_std': statistics.stdev(max_biases),
+        'mean_bias_avg': statistics.mean(mean_biases),
+        'mean_bias_std': statistics.stdev(mean_biases),
+        'q_diff': q_diff / len(time_steps),
+        'mean_biases_plot': plt
+    }
 
 
 @hydra.main(config_path='cfgs', config_name='default')
@@ -95,6 +139,9 @@ def main(cfg):
         "std_schedule": cfg.std_schedule,
         "std_clip": cfg.std_clip,
         "device": cfg.device,
+        "value_expansion": cfg.value_expansion,
+        "value_aggregation": cfg.value_aggregation,
+        "normalize_z": cfg.normalize_z
     }
 
     agent = TCRL(**tcrl_kwargs)
@@ -118,13 +165,13 @@ def main(cfg):
     timer = helper.Timer()
     global_step, start_time = 0, time.time()
     total_training_time, total_eval_time, data_collection_time = 0, 0, 0
-
     for ep in range(cfg.train_episode + 1):
         ###### collect an episodic trajectory ######
         time_step = env.reset()
         replay_storage.add(time_step)
         ep_step, ep_reward = 0, 0
         timer.reset()
+        time_steps = [time_step]
         while not time_step.last():
             if ep < cfg.random_episode:
                 action = np.random.uniform(-1, 1, env.action_spec().shape).astype(dtype=env.action_spec().dtype)
@@ -133,21 +180,25 @@ def main(cfg):
                 action = action.cpu().numpy()
 
             time_step = env.step(action)
+            time_steps.append(time_step)
             replay_storage.add(time_step)
 
             global_step += 1
             ep_reward += time_step.reward
             ep_step += 1
+
+
         data_collection_time += timer.reset()
 
         ###### update model ######
         if ep >= cfg.random_episode:
-            timer.reset()
             train_info = dict()
+            train_info.update(log_q_bias(time_steps, agent, cfg))
+            timer.reset()
             for _ in range(cfg.episode_length // cfg.update_every_steps):
                 if replay_iter is None:
                     replay_iter = iter(replay_loader)
-                train_info = agent.update(ep, replay_iter, cfg.batch_size)  # log training every episode
+                train_info.update(agent.update(ep, replay_iter, cfg.batch_size))  # log training every episode
             elapsed_time = timer.reset()
             total_training_time += elapsed_time
             # logging
