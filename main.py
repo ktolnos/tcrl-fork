@@ -141,7 +141,9 @@ def main(cfg):
         "device": cfg.device,
         "value_expansion": cfg.value_expansion,
         "value_aggregation": cfg.value_aggregation,
-        "normalize_z": cfg.normalize_z
+        "normalize_z": cfg.normalize_z,
+        "lambda_": cfg.lambda_,
+        "policy_update": cfg.policy_update,
     }
 
     agent = TCRL(**tcrl_kwargs)

@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - task: cheetah_run
+  - task: dog_run
 
   # disable hydra logging
   - override hydra/hydra_logging: disabled
@@ -10,7 +10,7 @@ seed: -1 # generate random seed if seed == -1 (by defalut)
 
 env_name: ${env_name}
 algo_name: tcrl
-exp_name: mve_min-norm_z
+exp_name: default-reward=20-double_trans
 
 # training
 device: ???
@@ -57,13 +57,16 @@ distraction_random_walk: true
 distraction_reward_noise: true
 distraction_obs_noise: true
 
-value_expansion: mve # td-k, mve, double-mve
+value_expansion: td-k # td-k, mve, double-mve, lambda-mve
 value_aggregation: min # min, mean, max
-normalize_z: true
+normalize_z: false
+lambda_: 0.95
+
+policy_update: ddpg # ddpg, backprop, lambda_bp
 
 # options
 save_video: false
-use_wandb: true
+use_wandb: false
 save_buffer: false
 save_model: false
 save_interval: 500

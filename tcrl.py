@@ -86,11 +86,14 @@ class TCRL(object):
                  lr, weight_decay=1e-6, tau=0.005, rho=0.9, gamma=0.99,
                  nstep=3, horizon=5, state_coef=1.0, reward_coef=1.0, grad_clip_norm=10.,
                  std_schedule="", std_clip=0.3,
-                 device='cuda', value_expansion='td-k', value_aggregation='min', normalize_z=False):
+                 device='cuda', value_expansion='td-k', value_aggregation='min', normalize_z=False,
+                 lambda_=0.95, policy_update='ddpg'):
+        self.policy_update = policy_update
         if value_expansion == 'double-mve' and value_aggregation == 'mean':
             raise ValueError(f'Cant use {value_expansion} with {value_aggregation}')
         self.value_expansion = value_expansion
         self.value_aggregation = value_aggregation
+        self.lambda_ = lambda_
         self.device = torch.device(device)
 
         # models
@@ -274,6 +277,46 @@ class TCRL(object):
 
         return {'q': q1.mean().item(), 'q_loss': q_loss.item()}
 
+    def _update_q_gae(self, z):
+        zs, acts, rs, qs = [z], [], [], []
+
+        with torch.no_grad():
+            for t in range(self.nstep):
+                act = self.actor(zs[t], self.std).sample(self.std_clip)
+                acts.append(act)
+                qs.append(self.aggregate_values(*self.critic_tar(zs[t], acts[t])))
+                z, r = self.trans1(zs[t], act)
+                zs.append(z)
+                rs.append(r)
+
+            # calculate td_target
+            next_q = self.aggregate_values(*self.critic_tar(z, self.actor(z, self.std).sample(self.std_clip)))
+
+            td_targets = []
+            for t in reversed(range(len(rs))):
+                if t == len(rs) - 1:  # the last timestep
+                    next_values = next_q
+                else:
+                    next_values = (1-self.lambda_) * qs[t+1] + self.lambda_*td_targets[-1]
+
+                td_targets.append(rs[t] + self.gamma * next_values)
+
+            td_targets = list(reversed(td_targets))
+
+        # calculate the td error
+        q_loss = 0
+        for t, td_target in enumerate(td_targets):
+            q1, q2 = self.critic(zs[t], acts[t])
+            q_loss += h.mse(q1, td_target) + h.mse(q2, td_target)
+        q_loss = torch.mean(q_loss)
+
+        self.critic_optim.zero_grad(set_to_none=True)
+        q_loss.register_hook(lambda grad: grad * (1 / self.nstep))
+        q_loss.backward()
+        self.critic_optim.step()
+
+        return {'q': q1.mean().item(), 'q_loss': q_loss.item()}
+
 
     def _update_q_double_mve(self, z):
         zs, acts, rs = [z], [], []
@@ -288,7 +331,10 @@ class TCRL(object):
                 act2 = self.actor(z2, self.std).sample(self.std_clip)
                 q1 = torch.max(*self.critic_tar(z1, act1))
                 q2 = torch.max(*self.critic_tar(z2, act2))
-                z1_mask = q1 > q2
+                if self.value_aggregation == 'min':
+                    z1_mask = q1 < q2
+                else:
+                    z1_mask = q1 > q2
                 z2_mask = ~z1_mask
                 z = z1 * z1_mask + z2 * z2_mask
                 r = r1 * z1_mask + r2 * z2_mask
@@ -311,7 +357,7 @@ class TCRL(object):
         q_loss = 0
         for t, td_target in enumerate(td_targets):
             q1, q2 = self.critic(zs[t], acts[t])
-            q_loss = h.mse(q1, td_target) + h.mse(q2, td_target)
+            q_loss += h.mse(q1, td_target) + h.mse(q2, td_target)
         q_loss = torch.mean(q_loss)
         # H-step td
         # q1, q2 = self.critic(zs[0], acts[0])
@@ -334,6 +380,63 @@ class TCRL(object):
         pi_loss.backward()
         self.actor_optim.step()
 
+        return {'pi_loss': pi_loss.item()}
+
+
+    def _update_pi_bp(self, z):
+        Q = 0
+        with FreezeParameters([self.trans1, self.trans2]):
+            for t in range(self.nstep):
+                act = self.actor(z, self.std).sample(self.std_clip)
+                z, r = self.trans1(z, act)
+                Q += (self.gamma ** t) * r
+
+        # calculate td_target
+        with FreezeParameters([self.critic]):
+            next_q = self.aggregate_values(*self.critic(z, self.actor(z, self.std).sample(self.std_clip)))
+        Q += (self.gamma ** self.nstep) * next_q
+
+        pi_loss = -Q.mean()
+
+        self.actor_optim.zero_grad(set_to_none=True)
+        pi_loss.backward()
+        self.actor_optim.step()
+        return {'pi_loss': pi_loss.item()}
+
+    def _update_pi_lambda_bp(self, z):
+        zs, acts, rs, qs = [z], [], [], []
+
+        with FreezeParameters([self.critic, self.trans2, self.trans1]):
+            for t in range(self.nstep):
+                act = self.actor(zs[t], self.std).sample(self.std_clip)
+                acts.append(act)
+                qs.append(self.aggregate_values(*self.critic(zs[t], acts[t])))
+                z, r = self.trans1(zs[t], act)
+                zs.append(z)
+                rs.append(r)
+
+            # calculate td_target
+            next_q = self.aggregate_values(*self.critic(z, self.actor(z, self.std).sample(self.std_clip)))
+
+            td_targets = []
+            for t in reversed(range(len(rs))):
+                if t == len(rs) - 1:  # the last timestep
+                    next_values = next_q
+                else:
+                    next_values = (1 - self.lambda_) * qs[t + 1] + self.lambda_ * td_targets[-1]
+
+                td_targets.append(rs[t] + self.gamma * next_values)
+
+            lambda_q_sum = 0
+            for q in reversed(td_targets):
+                lambda_q_sum += q
+
+        pi_loss = -lambda_q_sum.mean()
+
+        self.actor_optim.zero_grad(set_to_none=True)
+        pi_loss.register_hook(lambda grad: grad / self.nstep)
+        pi_loss.backward()
+        self.actor_optim.step()
         return {'pi_loss': pi_loss.item()}
 
     def update(self, step, replay_iter, batch_size):
@@ -360,7 +463,9 @@ class TCRL(object):
             info.update(self._update_q_mve(z0))
         elif self.value_expansion == 'double-mve':
             info.update(self._update_q_double_mve(z0))
-        else:
+        elif self.value_expansion == 'lambda-mve':
+            info.update(self._update_q_gae(z0))
+        elif self.value_expansion == 'td-k':
             zt = self.enc(next_obses[self.nstep - 1])
             _rew, _discount = 0, 1
             for t in range(self.nstep):
@@ -369,9 +474,18 @@ class TCRL(object):
             self.z_prep_time += timer.reset()
             # udpate policy and value functions
             info.update(self._update_q(z0, action[0], _rew, _discount, zt))
+        else:
+            raise ValueError(f'Unsupported self.value_expansion = {self.value_expansion}')
 
         self.q_time += timer.reset()
-        info.update(self._update_pi(z0))
+        if self.policy_update == 'ddpg':
+            info.update(self._update_pi(z0))
+        elif self.policy_update == 'backprop':
+            info.update(self._update_pi_bp(z0))
+        elif self.policy_update == 'lambda_bp':
+            info.update(self._update_pi_lambda_bp(z0))
+        else:
+            raise ValueError(f'Unsupported self.policy_update = {self.policy_update}')
         self.pi_time += timer.reset()
 
         # update target networks
