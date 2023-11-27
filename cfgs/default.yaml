@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - task: dog_run
+  - task: cheetah_run
 
   # disable hydra logging
   - override hydra/hydra_logging: disabled
@@ -10,7 +10,7 @@ seed: -1 # generate random seed if seed == -1 (by defalut)
 
 env_name: ${env_name}
 algo_name: tcrl
-exp_name: default-reward=20-double_trans
+exp_name: default
 
 # training
 device: ???
@@ -27,7 +27,7 @@ eval_episode: 10
 update_every_steps: 2
 
 batch_size: 512
-reward_coef: 20.0
+reward_coef: 1.0 # 20 to match model magnitude
 state_coef: 1.0
 horizon: 5
 tau: 0.005
@@ -57,16 +57,19 @@ distraction_random_walk: true
 distraction_reward_noise: true
 distraction_obs_noise: true
 
-value_expansion: td-k # td-k, mve, double-mve, lambda-mve
-value_aggregation: min # min, mean, max
-normalize_z: false
+value_expansion: td-k # td-k (tcrl), mve, double-mve, lambda-mve, joint
+value_aggregation: min # min (tcrl), mean, max
+normalize_z: false # tcrl=false
 lambda_: 0.95
+critic_mode: q # q (tcrl), value, double_model_value
+critic_model_grad: none # none, first, both
+model_loss: cosine # cosine (tcrl), mse
 
-policy_update: ddpg # ddpg, backprop, lambda_bp
+policy_update: ddpg # ddpg (tcrl), backprop, lambda_bp
 
 # options
 save_video: false
-use_wandb: false
+use_wandb: true
 save_buffer: false
 save_model: false
 save_interval: 500

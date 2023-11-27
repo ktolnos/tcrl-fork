@@ -144,6 +144,9 @@ def main(cfg):
         "normalize_z": cfg.normalize_z,
         "lambda_": cfg.lambda_,
         "policy_update": cfg.policy_update,
+        "critic_mode": cfg.critic_mode,
+        "critic_model_grad": cfg.critic_model_grad,
+        "model_loss": cfg.model_loss
     }
 
     agent = TCRL(**tcrl_kwargs)

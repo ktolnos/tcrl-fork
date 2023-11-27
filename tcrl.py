@@ -46,6 +46,40 @@ class Critic(nn.Module):
         return self._critic1(feature), self._critic2(feature)
 
 
+class ValueCritic(nn.Module):
+    def __init__(self, latent_dim, mlp_dims, transition1, transition2, critic_model_grad):
+        super().__init__()
+        self.transition2 = transition2
+        self.transition1 = transition1
+
+        if critic_model_grad == 'none':
+            self.freeze_params_list = [transition1, transition2]
+        elif critic_model_grad == 'first':
+            self.freeze_params_list = [transition1.reward, transition2]
+        elif critic_model_grad == 'both':
+            self.freeze_params_list = [transition1.reward, transition2.reward]
+        else:
+            raise ValueError(f'Unsupported critic_model_grad {critic_model_grad}')
+
+        self.trunk = nn.Sequential(nn.Linear(latent_dim, mlp_dims[0]),
+                                   nn.LayerNorm(mlp_dims[0]), nn.Tanh())
+        self._critic1 = net.mlp(mlp_dims[0], mlp_dims[1:], 1)
+        self._critic2 = net.mlp(mlp_dims[0], mlp_dims[1:], 1)
+        self.apply(net.orthogonal_init)
+
+    def value(self, z1, z2):
+        feature1 = self.trunk(z1)
+        feature2 = self.trunk(z2)
+        return self._critic1(feature1), self._critic2(feature2)
+
+    def forward(self, z, a):
+        with FreezeParameters(self.freeze_params_list):
+            z1, reward1 = self.transition1(z, a)
+            z2, reward2 = self.transition2(z, a)
+
+        return self.value(z1, z2)
+
+
 class Encoder(nn.Module):
     def __init__(self, obs_shape, mlp_dims, latent_dim, normalize_z):
         super().__init__()
@@ -65,8 +99,8 @@ class LatentModel(nn.Module):
     def __init__(self, latent_dim, action_shape, mlp_dims, normalize_z):
         super().__init__()
         self.normalize_z = normalize_z
-        self._dynamics = net.mlp(latent_dim + action_shape[0], mlp_dims, latent_dim)
-        self._reward = net.mlp(latent_dim + action_shape[0], mlp_dims, 1)
+        self.dynamics = net.mlp(latent_dim + action_shape[0], mlp_dims, latent_dim)
+        self.reward = net.mlp(latent_dim + action_shape[0], mlp_dims, 1)
         self.apply(net.orthogonal_init)
 
     def forward(self, z, action):
@@ -74,10 +108,10 @@ class LatentModel(nn.Module):
         assert z.ndim == action.ndim == 2  # [batch_dim, a/s_dim]
 
         x = torch.cat([z, action], dim=-1)  # shape[B, xdim]
-        next_z = self._dynamics(x)
+        next_z = self.dynamics(x)
         if self.normalize_z:
             next_z = torch.nn.functional.normalize(next_z) * z.shape[-1]
-        reward = self._reward(x)
+        reward = self.reward(x)
         return next_z, reward
 
 
@@ -87,7 +121,9 @@ class TCRL(object):
                  nstep=3, horizon=5, state_coef=1.0, reward_coef=1.0, grad_clip_norm=10.,
                  std_schedule="", std_clip=0.3,
                  device='cuda', value_expansion='td-k', value_aggregation='min', normalize_z=False,
-                 lambda_=0.95, policy_update='ddpg'):
+                 lambda_=0.95, policy_update='ddpg', critic_mode='q', critic_model_grad='none', model_loss='cosine'):
+        self.model_loss = model_loss
+        self.critic_model_grad = critic_model_grad
         self.policy_update = policy_update
         if value_expansion == 'double-mve' and value_aggregation == 'mean':
             raise ValueError(f'Cant use {value_expansion} with {value_aggregation}')
@@ -105,8 +141,33 @@ class TCRL(object):
 
         self.actor = Actor(latent_dim, mlp_dims, action_shape).to(self.device)
 
-        self.critic = Critic(latent_dim, mlp_dims, action_shape).to(self.device)
-        self.critic_tar = Critic(latent_dim, mlp_dims, action_shape).to(self.device)
+        if critic_mode == 'q':
+            self.critic = Critic(latent_dim, mlp_dims, action_shape).to(self.device)
+            self.critic_tar = Critic(latent_dim, mlp_dims, action_shape).to(self.device)
+        elif critic_mode == 'value':
+            self.critic = ValueCritic(latent_dim, mlp_dims,
+                                      transition1=self.trans1,
+                                      transition2=self.trans1,
+                                      critic_model_grad=critic_model_grad
+                                      ).to(self.device)
+            self.critic_tar = ValueCritic(latent_dim, mlp_dims,
+                                          transition1=self.trans1,
+                                          transition2=self.trans1,
+                                          critic_model_grad=critic_model_grad
+                                          ).to(self.device)
+        elif critic_mode == 'double_model_value':
+            self.critic = ValueCritic(latent_dim, mlp_dims,
+                                      transition1=self.trans1,
+                                      transition2=self.trans2,
+                                      critic_model_grad=critic_model_grad
+                                      ).to(self.device)
+            self.critic_tar = ValueCritic(latent_dim, mlp_dims,
+                                          transition1=self.trans1,
+                                          transition2=self.trans2,
+                                          critic_model_grad=critic_model_grad
+                                          ).to(self.device)
+        else:
+            raise ValueError(f'Unsupported critic_mode={critic_mode}')
 
         # init optimizer
         self.enc_trans_optim = torch.optim.Adam(list(self.encoder.parameters()) + \
@@ -180,7 +241,16 @@ class TCRL(object):
 
         z = self.encoder(obs)
         mse = 0
+        critic_loss = torch.zeros((z.shape[0]), device=self.device)
+        if self.model_loss == 'mse':
+            consistency_loss_fn = h.mse
+        elif self.model_loss == 'cosine':
+            consistency_loss_fn = h.cosine
+        else:
+            raise ValueError(f'Unrecognized model loss {self.model_loss}')
 
+        prev_v1, prev_v2 = None, None
+        prev_r1, prev_r2 = None, None
         for t in range(self.horizon):
             next_z_pred1, r_pred1 = self.trans1(z, action[t])
             next_z_pred2, r_pred2 = self.trans2(z, action[t])
@@ -193,7 +263,7 @@ class TCRL(object):
 
             # Losses
             rho = (self.rho ** t)
-            state_loss += rho * torch.mean(h.cosine(next_z_pred1, next_z_tar) + h.cosine(next_z_pred2, next_z_tar), dim=-1)
+            state_loss += rho * torch.mean(consistency_loss_fn(next_z_pred1, next_z_tar) + consistency_loss_fn(next_z_pred2, next_z_tar), dim=-1)
             reward_loss += rho * torch.mean(h.mse(r_pred1, r_tar) + h.mse(r_pred2, r_tar), dim=-1)
             mse += rho * h.mse(next_z_pred1, next_z_tar).mean()
 
@@ -204,8 +274,30 @@ class TCRL(object):
             z = z.clone()
             z[z2_idx] = next_z_pred2[z2_idx]
 
+            if self.value_expansion == 'joint':
+                if self.critic_model_grad == 'first':
+                    z2 = next_z_pred1
+                elif self.critic_model_grad == 'both':
+                    z2 = next_z_pred2
+                else:
+                    raise f'critic_model_grad={self.critic_model_grad} cannot be used with joint optimization'
+
+                if prev_v1 is not None:
+                    with torch.no_grad():
+                        v1_tar, v2_tar = self.critic_tar.value(next_z_pred1, z2)
+                        td_target = torch.min(prev_r1 + self.gamma * v1_tar, prev_r2 + self.gamma * v2_tar)
+                    critic_loss += rho * (torch.mean(h.mse(prev_v1, td_target)) + torch.mean(h.mse(prev_v2, td_target)))
+
+                prev_v1, prev_v2 = self.critic.value(next_z_pred1, z2)
+                prev_r1 = r_pred1
+                if self.critic_model_grad == 'first':
+                    prev_r2 = r_pred1
+                elif self.critic_model_grad == 'both':
+                    prev_r2 = r_pred2
+
         total_loss = (self.state_coef * state_loss.clamp(max=1e4) + \
-                      self.reward_coef * reward_loss.clamp(max=1e4)).mean()
+                      self.reward_coef * reward_loss.clamp(max=1e4) +\
+                      critic_loss.clamp(max=1e4)).mean()
 
         total_loss.register_hook(lambda grad: grad * (1 / self.horizon))
         total_loss.backward()
@@ -474,6 +566,8 @@ class TCRL(object):
             self.z_prep_time += timer.reset()
             # udpate policy and value functions
             info.update(self._update_q(z0, action[0], _rew, _discount, zt))
+        elif self.value_expansion == 'joint':
+            ...  # handled by the model update
         else:
             raise ValueError(f'Unsupported self.value_expansion = {self.value_expansion}')
 
